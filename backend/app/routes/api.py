@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request, current_app
 from bson import ObjectId
-import datetime
+import time
 
 api_bp = Blueprint("api", __name__)
 
@@ -32,28 +32,63 @@ def get_latest_sensor_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Util: normalisasi payload agar sesuai skema Nutricomm
+def _normalize_sensor_payload(raw: dict) -> dict:
+    if not raw:
+        return {}
+
+    id_kebun = raw.get("id_kebun")
+    if id_kebun is None:
+        id_kebun = "KBG001"
+    else:
+        id_kebun = str(id_kebun)
+
+    suhu = raw.get("suhu", raw.get("temperature"))
+    kelembapan_udara = raw.get("kelembapan_udara", raw.get("humidity"))
+    kelembapan_tanah = raw.get("kelembapan_tanah")
+    cahaya = raw.get("cahaya", raw.get("ldr"))
+
+    co2 = raw.get("co2")
+    if co2 is None:
+        gas = raw.get("gas") or {}
+        if isinstance(gas, dict):
+            co2 = gas.get("CO2") or gas.get("co2")
+
+    timestamp = raw.get("timestamp")
+    if not timestamp:
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    doc = {
+        "id_kebun": id_kebun,
+        "suhu": suhu,
+        "kelembapan_udara": kelembapan_udara,
+        "kelembapan_tanah": kelembapan_tanah,
+        "cahaya": cahaya,
+        "co2": co2,
+        "timestamp": timestamp,
+    }
+    return {k: v for k, v in doc.items() if v is not None}
+
 # ✅ [POST] Tambah data sensor
 @api_bp.route("/sensor", methods=["POST"])
 def add_sensor_data():
     try:
-        payload = request.get_json()
-        if not payload:
+        raw = request.get_json()
+        if not raw:
             return jsonify({"error": "Payload kosong"}), 400
-
-        # Validasi minimal agar tidak menyimpan data kosong
-        required_keys = ["suhu", "kelembaban", "gas", "ldr"]
+        payload = _normalize_sensor_payload(raw)
+        # Validasi minimal untuk skema baru
+        required_keys = ["suhu", "kelembapan_udara", "kelembapan_tanah", "cahaya", "co2"]
         for key in required_keys:
             if key not in payload:
                 return jsonify({"error": f"Key '{key}' tidak ditemukan"}), 400
 
         collection = current_app.db["sensor_data"]
-        payload["timestamp"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         result = collection.insert_one(payload)
 
         # Kirimkan update ke semua client WebSocket
         from app import socketio
-        socketio.emit("sensor_update", payload)
+        socketio.emit("sensor_update", payload, namespace="/ws")
 
         return jsonify({
             "message": "Data berhasil disimpan",

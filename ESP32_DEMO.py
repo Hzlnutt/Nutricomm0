@@ -22,12 +22,18 @@ for adc in [MQ135_PIN, LDR_PIN]:
 dht11 = dht.DHT11(DHT11_PIN)
 
 # --- WiFi & MQTT ---
+# Ubah sesuai lingkungan Anda
 SSID = "hotspotkeren"
 PASSWORD = "87654321"
-MQTT_SERVER = "192.168.137.1"  # IP broker (Laptop)
+
+# MQTT broker dan backend host diselaraskan dengan backend baru
+MQTT_SERVER = "192.168.0.182"   # Broker MQTT
 CLIENT_ID = "ESP32Client"
-SERVER_IP = "192.168.0.182"    # IP Flask (Laptop)
-url = f"http://{SERVER_IP}:5000/api/sensor"
+BACKEND_HOST = "192.168.0.182"  # Host Flask backend
+HTTP_URL = "http://%s:5000/api/sensor" % BACKEND_HOST
+
+# Identitas kebun untuk Nutricomm
+ID_KEBUN = "KBG001"
 
 # --- Variabel Global ---
 lampStatus = [0, 0, 0, 0, 0]  # 4 lampu + kipas
@@ -132,10 +138,10 @@ while True:
             try:
                 dht11.measure()
                 suhu = dht11.temperature()
-                kelembaban = dht11.humidity()
-                print("💡 LDR Value:", suhu)
+                kelembaban_udara = dht11.humidity()
+                print("🌡️ Suhu:", suhu, " Kelembapan Udara:", kelembaban_udara)
             except:
-                suhu, kelembaban = None, None
+                suhu, kelembaban_udara = None, None
 
             # --- MQ135 ---
             gas_raw = MQ135_PIN.read()
@@ -152,7 +158,7 @@ while True:
             else:
                 BUZZER.value(0)
 
-            # --- LDR ---
+            # --- LDR sebagai intensitas cahaya ---
             ldr_value = LDR_PIN.read()
             print("💡 LDR Value:", ldr_value)
 
@@ -172,32 +178,35 @@ while True:
                     FAN.value(1)
                     lampStatus[4] = 0
 
-            # --- Kirim data MQTT + Flask ---
+            # --- Kirim data MQTT + HTTP ke backend Nutricomm ---
             if suhu is not None:
-                data = {
-                    "temperature": suhu,
-                    "humidity": kelembaban,
-                    "gas": gas_ppm,
-                    "ldr": ldr_value,
-                    "fan_mode": "AUTO" if fan_auto else "MANUAL",
-                    "lampu": {
-                        "lamp1": LAMP1.value() == 0,
-                        "lamp2": LAMP2.value() == 0,
-                        "lamp3": LAMP3.value() == 0,
-                        "lamp4": LAMP4.value() == 0,
-                        "fan": FAN.value() == 0
-                    }
+                # Skema Nutricomm
+                payload = {
+                    "id_kebun": ID_KEBUN,
+                    "suhu": suhu,
+                    "kelembapan_udara": kelembaban_udara,
+                    # Tanah: jika belum ada sensor tanah, estimasi sederhana dari kelembapan udara
+                    "kelembapan_tanah": max(0, min(100, int((kelembaban_udara or 0) * 0.8))),
+                    "cahaya": ldr_value,
+                    "co2": gas_ppm.get("CO2"),
+                    "timestamp": None  # biarkan backend mengisi jika None
                 }
 
-                client.publish(b"iot/monitoring", json.dumps(data))
-                print("📤 MQTT Data:", data)
-
+                # Publish ke MQTT
                 try:
-                    res = urequests.post(url, json=data)
-                    print("📡 Flask API:", res.status_code)
+                    client.publish(b"iot/monitoring", json.dumps(payload))
+                    print("📤 MQTT Nutricomm:", payload)
+                except Exception as e:
+                    print("❌ Gagal publish MQTT:", e)
+
+                # Kirim HTTP ke backend (opsional, sebagai fallback)
+                try:
+                    headers = {"Content-Type": "application/json"}
+                    res = urequests.post(HTTP_URL, data=json.dumps(payload), headers=headers)
+                    print("📡 HTTP API:", res.status_code)
                     res.close()
                 except Exception as e:
-                    print("❌ Gagal kirim API:", e)
+                    print("❌ Gagal kirim HTTP:", e)
 
             time.sleep_ms(100)
 
