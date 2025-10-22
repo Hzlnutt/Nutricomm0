@@ -9,26 +9,23 @@ import {
 } from 'react-native'; 
 import { Ionicons, Entypo } from '@expo/vector-icons';
 import { SensorData } from '../types';
+// Realtime via Socket.IO
+import { io, Socket } from 'socket.io-client';
 
 export default function Dashboard() {
   const [sensorData, setSensorData] = useState<SensorData | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [notifications, setNotifications] = useState<string[]>([]);
 
+  const BACKEND = 'http://<BACKEND_IP>:5000'; // TODO: set IP backend Anda
+
   const fetchLatestData = async () => {
     try {
-      // Simulasi API call
-      const mockData: SensorData = {
-        id_kebun: 'KBG001',
-        suhu: 28.4,
-        kelembapan_udara: 72.1,
-        kelembapan_tanah: 40.3,
-        cahaya: 560,
-        co2: 420,
-        timestamp: new Date().toISOString(),
-      };
-      setSensorData(mockData);
-      checkNotifications(mockData);
+      const res = await fetch(`${BACKEND}/api/sensor/latest`);
+      if (!res.ok) throw new Error('HTTP error');
+      const data: SensorData = await res.json();
+      setSensorData(data);
+      checkNotifications(data);
     } catch (error) {
       Alert.alert('Error', 'Gagal mengambil data sensor');
     }
@@ -64,6 +61,12 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchLatestData();
+    const socket: Socket = io(`${BACKEND}/ws`, { transports: ['websocket'] });
+    socket.on('sensor_update', (data: SensorData) => {
+      setSensorData(data);
+      checkNotifications(data);
+    });
+    return () => socket.disconnect();
   }, []);
 
   const SensorCard = ({ 

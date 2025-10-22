@@ -5,7 +5,8 @@ from pymongo import MongoClient
 from .config import Config
 from app.routes.api import api_bp  # pastikan folder structure: app/routes/api.py
 
-socketio = SocketIO(async_mode='threading')
+# Izinkan akses dari aplikasi mobile/dev secara fleksibel
+socketio = SocketIO(async_mode='threading', cors_allowed_origins='*')
 
 def create_app():
     app = Flask(__name__)
