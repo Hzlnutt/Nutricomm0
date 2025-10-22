@@ -1,25 +1,43 @@
-from machine import Pin, ADC
+from machine import Pin, ADC, I2C
 import network, time, json, dht, urequests
 from umqtt.simple import MQTTClient
 
-# --- Pin Definisi ---
-LAMP1 = Pin(5, Pin.OUT)
-LAMP2 = Pin(18, Pin.OUT)
-LAMP3 = Pin(19, Pin.OUT)
-LAMP4 = Pin(21, Pin.OUT)
-FAN = Pin(16, Pin.OUT)
-BUZZER = Pin(23, Pin.OUT)
+# === Konfigurasi sensor Nutricomm ===
+# DHT22 (gunakan DHT22 class tapi masih kompatibel di import 'dht')
+DHT_PIN = Pin(15, Pin.IN)
+dht_sensor = dht.DHT22(DHT_PIN)
 
-DHT11_PIN = Pin(15, Pin.IN)
+# Soil moisture analog (ubah pin sesuai rangkaian)
+SOIL_PIN = ADC(Pin(33))
+SOIL_PIN.atten(ADC.ATTN_11DB)
+SOIL_PIN.width(ADC.WIDTH_12BIT)
+
+# BH1750 (I2C light sensor) — jika tidak ada, fallback ke LDR
+I2C_SCL = Pin(22)
+I2C_SDA = Pin(21)
+i2c = I2C(0, scl=I2C_SCL, sda=I2C_SDA, freq=100000)
+
+def bh1750_read_lux():
+    try:
+        addr = 0x23
+        # Start measurement in one-time H-Resolution mode
+        i2c.writeto(addr, b"\x20")
+        time.sleep_ms(180)
+        data = i2c.readfrom(addr, 2)
+        raw = (data[0] << 8) | data[1]
+        return int(raw / 1.2)
+    except Exception:
+        return None
+
+# MQ135 (analog)
 MQ135_PIN = ADC(Pin(34))
+MQ135_PIN.atten(ADC.ATTN_11DB)
+MQ135_PIN.width(ADC.WIDTH_12BIT)
+
+# Fallback LDR (opsional) jika BH1750 tidak ada
 LDR_PIN = ADC(Pin(32))
-
-# --- ADC Setup ---
-for adc in [MQ135_PIN, LDR_PIN]:
-    adc.atten(ADC.ATTN_11DB)
-    adc.width(ADC.WIDTH_12BIT)
-
-dht11 = dht.DHT11(DHT11_PIN)
+LDR_PIN.atten(ADC.ATTN_11DB)
+LDR_PIN.width(ADC.WIDTH_12BIT)
 
 # --- WiFi & MQTT ---
 # Ubah sesuai lingkungan Anda
@@ -52,51 +70,9 @@ def connect_wifi():
             time.sleep(0.5)
     print("\n✅ WiFi Terkoneksi:", wlan.ifconfig())
 
-# --- MQTT Callback ---
 def sub_cb(topic, msg):
-    global fan_auto
-    try:
-        data = json.loads(msg.decode())
-        lamp = int(data.get("lamp", 0))
-        status = data.get("status", "")
-        mode = data.get("mode", "")
-
-        if lamp == 5:
-            # mode kipas (AUTO/MANUAL)
-            fan_auto = (mode == "AUTO")
-            print(f"🌀 Kipas mode: {mode}")
-            return
-
-        if 1 <= lamp <= 5:
-            idx = lamp - 1
-            lampStatus[idx] = 1 if status == "ON" else 0
-            relay = [LAMP1, LAMP2, LAMP3, LAMP4, FAN][idx]
-
-            if lamp == 5 and fan_auto:
-                print("❌ Manual kipas diabaikan (AUTO aktif)")
-            else:
-                relay.value(0 if lampStatus[idx] else 1)
-                publish_status(lamp, lampStatus[idx])
-
-    except Exception as e:
-        print("❌ Error MQTT:", e)
-
-# --- Publish Status ---
-def publish_status(lamp, state):
-    if client:
-        data = {"lamp": lamp, "status": "ON" if state else "OFF"}
-        client.publish(b"iot/lamp/status", json.dumps(data))
-
-def publish_all_status():
-    if client:
-        data = {
-            "lamp1": "ON" if LAMP1.value() == 0 else "OFF",
-            "lamp2": "ON" if LAMP2.value() == 0 else "OFF",
-            "lamp3": "ON" if LAMP3.value() == 0 else "OFF",
-            "lamp4": "ON" if LAMP4.value() == 0 else "OFF",
-            "fan": "ON" if FAN.value() == 0 else "OFF"
-        }
-        client.publish(b"iot/lamp/status", json.dumps(data))
+    # Tidak ada kontrol; hanya placeholder jika nanti diperlukan
+    pass
 
 # --- MQTT Setup ---
 def connect_mqtt():
@@ -106,7 +82,6 @@ def connect_mqtt():
             client = MQTTClient(CLIENT_ID, MQTT_SERVER)
             client.set_callback(sub_cb)
             client.connect()
-            client.subscribe(b"iot/lamp/cmd/#")
             print("✅ MQTT Terhubung ke", MQTT_SERVER)
             break
         except Exception as e:
@@ -117,10 +92,7 @@ def connect_mqtt():
 connect_wifi()
 connect_mqtt()
 
-# Semua relay OFF (HIGH = off)
-for r in [LAMP1, LAMP2, LAMP3, LAMP4, FAN]:
-    r.value(1)
-BUZZER.value(0)
+client = None
 
 last_sensor = time.ticks_ms()
 interval_sensor = 5000  # 5 detik
@@ -134,11 +106,11 @@ while True:
         if time.ticks_diff(now, last_sensor) > interval_sensor:
             last_sensor = now
 
-            # --- DHT11 ---
+            # --- DHT22 ---
             try:
-                dht11.measure()
-                suhu = dht11.temperature()
-                kelembaban_udara = dht11.humidity()
+                dht_sensor.measure()
+                suhu = dht_sensor.temperature()
+                kelembaban_udara = dht_sensor.humidity()
                 print("🌡️ Suhu:", suhu, " Kelembapan Udara:", kelembaban_udara)
             except:
                 suhu, kelembaban_udara = None, None
@@ -151,16 +123,11 @@ while True:
                 "NH4": round((gas_raw / 4095) * 500, 2)
             }
 
-            # --- Buzzer peringatan gas ---
-            if gas_ppm["CO"] > 600:
-                BUZZER.value(1)
-                print("🚨 Gas tinggi! CO =", gas_ppm["CO"])
-            else:
-                BUZZER.value(0)
-
-            # --- LDR sebagai intensitas cahaya ---
-            ldr_value = LDR_PIN.read()
-            print("💡 LDR Value:", ldr_value)
+            # --- Cahaya --- prefer BH1750; fallback LDR
+            lux = bh1750_read_lux()
+            if lux is None:
+                lux = LDR_PIN.read()
+            print("💡 Cahaya:", lux)
 
             if ldr_value < 100:
                 print("🌙 Gelap → Semua lampu ON")
@@ -169,15 +136,6 @@ while True:
                     lampStatus[i] = 1
                 publish_all_status()
 
-            # --- Kipas AUTO ---
-            if fan_auto and suhu is not None:
-                if suhu > 35:
-                    FAN.value(0)
-                    lampStatus[4] = 1
-                else:
-                    FAN.value(1)
-                    lampStatus[4] = 0
-
             # --- Kirim data MQTT + HTTP ke backend Nutricomm ---
             if suhu is not None:
                 # Skema Nutricomm
@@ -185,9 +143,9 @@ while True:
                     "id_kebun": ID_KEBUN,
                     "suhu": suhu,
                     "kelembapan_udara": kelembaban_udara,
-                    # Tanah: jika belum ada sensor tanah, estimasi sederhana dari kelembapan udara
-                    "kelembapan_tanah": max(0, min(100, int((kelembaban_udara or 0) * 0.8))),
-                    "cahaya": ldr_value,
+                    # Soil moisture: ubah mapping sesuai kalibrasi sensor Anda
+                    "kelembapan_tanah": max(0, min(100, int((4095 - SOIL_PIN.read()) * 100 / 4095))),
+                    "cahaya": lux,
                     "co2": gas_ppm.get("CO2"),
                     "timestamp": None  # biarkan backend mengisi jika None
                 }

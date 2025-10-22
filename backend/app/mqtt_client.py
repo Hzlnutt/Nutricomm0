@@ -79,8 +79,7 @@ def start_mqtt(app, socketio):
         def on_connect(client, userdata, flags, rc):
             print("✅ MQTT connected with result code", rc)
             client.subscribe("iot/monitoring")
-            client.subscribe("iot/lamp/status")
-            print("📡 Subscribed to: iot/monitoring & iot/lamp/status")
+            print("📡 Subscribed to: iot/monitoring")
 
         def on_message(client, userdata, msg):
             try:
@@ -88,16 +87,10 @@ def start_mqtt(app, socketio):
                 print(f"📩 Data diterima dari {msg.topic}: {payload}")
 
                 normalized = _normalize_sensor_payload(payload)
-
-                # Simpan hanya jika payload sensor (bukan status lampu)
                 if msg.topic == "iot/monitoring":
                     collection.insert_one(normalized)
-                    # Emit ke frontend; gunakan namespace '/ws' agar konsisten
                     socketio.emit("sensor_update", normalized, namespace="/ws")
                     print("✅ Data tersimpan & dikirim ke WebSocket")
-                else:
-                    # Untuk topik status, tetap teruskan ke WS tanpa simpan
-                    socketio.emit("device_status", payload, namespace="/ws")
 
             except Exception as e:
                 print("❌ Error parsing message:", e)
